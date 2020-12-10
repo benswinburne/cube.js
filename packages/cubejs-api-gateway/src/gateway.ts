@@ -3,6 +3,7 @@ import R from 'ramda';
 import moment from 'moment';
 import uuid from 'uuid/v4';
 import bodyParser from 'body-parser';
+import type express from 'express';
 
 import { requestParser } from './requestParser';
 import { UserError } from './UserError';
@@ -11,14 +12,18 @@ import { SubscriptionServer } from './SubscriptionServer';
 import { LocalSubscriptionStore } from './LocalSubscriptionStore';
 import { getPivotQuery, getQueryGranularity, normalizeQuery, QUERY_TYPE } from './query';
 
-const toConfigMap = (metaConfig) => (
-  R.pipe(
-    R.map(c => [c.config.name, c.config]),
-    R.fromPairs
-  )(metaConfig)
+type MetaConfig = {
+  config: {
+    name: string,
+    title: string
+  }
+};
+
+const toConfigMap = (metaConfig: MetaConfig[]) => R.fromPairs(
+  R.map((c) => [c.config.name, c.config], metaConfig)
 );
 
-const prepareAnnotation = (metaConfig, query) => {
+const prepareAnnotation = (metaConfig: MetaConfig[], query: any) => {
   const configMap = toConfigMap(metaConfig);
 
   const annotation = (memberType) => (member) => {
@@ -73,6 +78,7 @@ const transformValue = (value, type) => {
 
 const transformData = (aliasToMemberNameMap, annotation, data, query, queryType) => (data.map(r => {
   const row = R.pipe(
+    // @ts-ignore
     R.toPairs,
     R.map(p => {
       const memberName = aliasToMemberNameMap[p[0]];
@@ -105,8 +111,10 @@ const transformData = (aliasToMemberNameMap, annotation, data, query, queryType)
     }),
     R.unnest,
     R.fromPairs
+  // @ts-ignore
   )(r);
 
+  // @ts-ignore
   const [{ dimension, granularity, dateRange } = {}] = query.timeDimensions;
 
   if (queryType === QUERY_TYPE.COMPARE_DATE_RANGE_QUERY) {
@@ -133,16 +141,46 @@ const coerceForSqlQuery = (query, context) => ({
   requestId: context.requestId
 });
 
+export interface ApiGatewayOptions {
+  refreshScheduler: any;
+  basePath?: string;
+  queryTransformer?: any;
+  subscriptionStore?: any;
+  enforceSecurityChecks?: boolean;
+  extendContext?: boolean;
+}
+
 export class ApiGateway {
-  constructor(apiSecret, compilerApi, adapterApi, logger, options) {
+  protected readonly refreshScheduler: any;
+
+  protected readonly basePath: string;
+
+  protected readonly queryTransformer: any;
+
+  protected readonly subscriptionStore: any;
+
+  protected readonly enforceSecurityChecks: boolean;
+
+  protected readonly extendContext: any;
+
+  protected requestMiddleware: any;
+
+  public checkAuthFn: any;
+
+  public constructor(
+    protected readonly apiSecret: string,
+    protected readonly compilerApi: any,
+    protected readonly adapterApi: any,
+    protected readonly logger: any,
+    options: ApiGatewayOptions,
+  ) {
     options = options || {};
-    this.apiSecret = apiSecret;
-    this.compilerApi = compilerApi;
-    this.adapterApi = adapterApi;
+
     this.refreshScheduler = options.refreshScheduler;
-    this.logger = logger;
+
     this.basePath = options.basePath || '/cubejs-api';
-    // eslint-disable-next-line no-unused-vars,@typescript-eslint/no-unused-vars
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     this.queryTransformer = options.queryTransformer || (async (query, context) => query);
     this.subscriptionStore = options.subscriptionStore || new LocalSubscriptionStore();
     this.enforceSecurityChecks = options.enforceSecurityChecks || (process.env.NODE_ENV === 'production');
@@ -151,7 +189,7 @@ export class ApiGateway {
     this.initializeMiddleware(options);
   }
 
-  initializeMiddleware(options) {
+  protected initializeMiddleware(options) {
     const checkAuthMiddleware = options.checkAuthMiddleware || this.checkAuth.bind(this);
     this.checkAuthFn = options.checkAuth || this.defaultCheckAuth.bind(this);
     const requestContextMiddleware = this.requestContextMiddleware.bind(this);
@@ -159,7 +197,7 @@ export class ApiGateway {
     this.requestMiddleware = [checkAuthMiddleware, requestContextMiddleware, requestLoggerMiddleware];
   }
 
-  initApp(app) {
+  public initApp(app: any) {
     app.get(`${this.basePath}/v1/load`, this.requestMiddleware, (async (req, res) => {
       await this.load({
         query: req.query.query,
@@ -220,15 +258,15 @@ export class ApiGateway {
     }));
   }
 
-  initSubscriptionServer(sendMessage) {
+  public initSubscriptionServer(sendMessage) {
     return new SubscriptionServer(this, sendMessage, this.subscriptionStore);
   }
 
-  duration(requestStarted) {
+  protected duration(requestStarted) {
     return requestStarted && (new Date().getTime() - requestStarted.getTime());
   }
 
-  async runScheduledRefresh({ context, res, queryingOptions }) {
+  public async runScheduledRefresh({ context, res, queryingOptions }) {
     const requestStarted = new Date();
     try {
       const refreshScheduler = this.refreshScheduler();
@@ -243,7 +281,7 @@ export class ApiGateway {
     }
   }
 
-  async meta({ context, res }) {
+  protected async meta({ context, res }) {
     const requestStarted = new Date();
     try {
       const metaConfig = await this.getCompilerApi(context).metaConfig({ requestId: context.requestId });
@@ -256,7 +294,7 @@ export class ApiGateway {
     }
   }
 
-  async getNormalizedQueries(query, context) {
+  protected async getNormalizedQueries(query, context): Promise<any> {
     query = this.parseQueryParam(query);
     let queryType = QUERY_TYPE.REGULAR_QUERY;
 
@@ -292,7 +330,7 @@ export class ApiGateway {
     return [queryType, normalizedQueries];
   }
 
-  async sql({ query, context, res }) {
+  protected async sql({ query, context, res }) {
     const requestStarted = new Date();
 
     try {
@@ -321,13 +359,13 @@ export class ApiGateway {
     }
   }
 
-  async dryRun({ query, context, res }) {
+  protected async dryRun({ query, context, res }: any) {
     const requestStarted = new Date();
 
     try {
       const [queryType, normalizedQueries] = await this.getNormalizedQueries(query, context);
 
-      const sqlQueries = await Promise.all(
+      const sqlQueries = await Promise.all<any>(
         normalizedQueries.map((normalizedQuery) => this.getCompilerApi(context).getSql(
           coerceForSqlQuery(normalizedQuery, context),
           { includeDebugInfo: process.env.NODE_ENV !== 'production' }
@@ -349,7 +387,7 @@ export class ApiGateway {
     }
   }
 
-  async load({ query, context, res, ...props }) {
+  protected async load({ query, context, res, ...props }: any) {
     const requestStarted = new Date();
 
     try {
@@ -449,7 +487,7 @@ export class ApiGateway {
     }
   }
 
-  async subscribe({
+  protected async subscribe({
     query, context, res, subscribe, subscriptionState, queryType
   }) {
     const requestStarted = new Date();
@@ -458,8 +496,9 @@ export class ApiGateway {
         type: 'Subscribe',
         query
       });
-      let result = null;
-      let error = null;
+
+      let result: any = null;
+      let error: any = null;
 
       if (!subscribe) {
         await this.load({ query, context, res, queryType });
@@ -493,11 +532,12 @@ export class ApiGateway {
     }
   }
 
-  resToResultFn(res) {
+  protected resToResultFn(res: express.Response) {
+    // @ts-ignore
     return (message, { status } = {}) => (status ? res.status(status).json(message) : res.json(message));
   }
 
-  parseQueryParam(query) {
+  protected parseQueryParam(query) {
     if (!query || query === 'undefined') {
       throw new UserError('query param is required');
     }
@@ -507,21 +547,23 @@ export class ApiGateway {
     return query;
   }
 
-  getCompilerApi(context) {
+  protected getCompilerApi(context) {
     if (typeof this.compilerApi === 'function') {
       return this.compilerApi(context);
     }
+
     return this.compilerApi;
   }
 
-  getAdapterApi(context) {
+  protected getAdapterApi(context) {
     if (typeof this.adapterApi === 'function') {
       return this.adapterApi(context);
     }
+
     return this.adapterApi;
   }
 
-  async contextByReq(req, authInfo, requestId) {
+  protected async contextByReq(req, authInfo, requestId) {
     const extensions = await Promise.resolve(typeof this.extendContext === 'function' ? this.extendContext(req) : {});
 
     return {
@@ -531,13 +573,13 @@ export class ApiGateway {
     };
   }
 
-  requestIdByReq(req) {
+  protected requestIdByReq(req) {
     return req.headers['x-request-id'] || req.headers.traceparent || uuid();
   }
 
-  handleError({
+  protected handleError({
     e, context, query, res, requestStarted
-  }) {
+  }: any) {
     if (e instanceof CubejsHandlerError) {
       this.log(context, {
         type: e.type,
@@ -587,7 +629,7 @@ export class ApiGateway {
     }
   }
 
-  async defaultCheckAuth(req, auth) {
+  protected async defaultCheckAuth(req, auth) {
     if (auth) {
       const secret = this.apiSecret;
       try {
@@ -608,7 +650,7 @@ export class ApiGateway {
     }
   }
 
-  async checkAuth(req, res, next) {
+  protected async checkAuth(req, res, next) {
     const auth = req.headers.authorization;
 
     try {
@@ -630,14 +672,14 @@ export class ApiGateway {
     }
   }
 
-  async requestContextMiddleware(req, res, next) {
+  protected async requestContextMiddleware(req, res, next) {
     req.context = await this.contextByReq(req, req.authInfo, this.requestIdByReq(req));
     if (next) {
       next();
     }
   }
 
-  async requestLogger(req, res, next) {
+  protected async requestLogger(req, res, next) {
     const details = requestParser(req, res);
     this.log(req.context, { type: 'REST API Request', ...details });
     if (next) {
@@ -645,7 +687,7 @@ export class ApiGateway {
     }
   }
 
-  compareDateRangeTransformer(query) {
+  protected compareDateRangeTransformer(query) {
     let queryCompareDateRange;
     let compareDateRangeTDIndex;
 
@@ -681,7 +723,7 @@ export class ApiGateway {
     }));
   }
 
-  log(context, event) {
+  protected log(context, event) {
     const { type, ...restParams } = event;
     this.logger(type, {
       ...restParams,
