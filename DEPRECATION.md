@@ -76,4 +76,7 @@ replaced by `heartBeatInterval`.
 
 **Deprecated in Release: v0.22.4**
 
-Node.js 8’s End of Life was December 31, 2019. This means no more updates. Please upgrade to Node.js 10 or higher.
+Node.js 8 reached [End of Life on December 31, 2019][link-nodejs-eol]. This
+means no more updates. Please upgrade to Node.js 10 or higher.
+
+[link-nodejs-eol]: https://github.com/nodejs/Release#end-of-life-releases
