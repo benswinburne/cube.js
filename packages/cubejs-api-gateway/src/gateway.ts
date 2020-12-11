@@ -3,7 +3,7 @@ import R from 'ramda';
 import moment from 'moment';
 import uuid from 'uuid/v4';
 import bodyParser from 'body-parser';
-import type express from 'express';
+import type { Request as ExpressRequest, Response, NextFunction, Application as ExpressApplication, RequestHandler } from 'express';
 
 import { requestParser } from './requestParser';
 import { UserError } from './UserError';
@@ -11,6 +11,7 @@ import { CubejsHandlerError } from './CubejsHandlerError';
 import { SubscriptionServer } from './SubscriptionServer';
 import { LocalSubscriptionStore } from './LocalSubscriptionStore';
 import { getPivotQuery, getQueryGranularity, normalizeQuery, QUERY_TYPE } from './query';
+import { CheckAuthFn, CheckAuthMiddlewareFn, ExtendContextFn, QueryTransformerFn, RequestContext } from './interfaces';
 
 type MetaConfig = {
   config: {
@@ -141,13 +142,22 @@ const coerceForSqlQuery = (query, context) => ({
   requestId: context.requestId
 });
 
+interface Request extends ExpressRequest {
+  context?: RequestContext,
+  authInfo?: any,
+}
+
 export interface ApiGatewayOptions {
   refreshScheduler: any;
   basePath?: string;
-  queryTransformer?: any;
+  extendContext?: ExtendContextFn;
+  checkAuth?: CheckAuthFn;
+  // @deprecated Please use checkAuth
+  checkAuthMiddleware?: CheckAuthMiddlewareFn;
+  queryTransformer?: QueryTransformerFn;
   subscriptionStore?: any;
   enforceSecurityChecks?: boolean;
-  extendContext?: boolean;
+  requestLoggerMiddleware?: any;
 }
 
 export class ApiGateway {
@@ -155,17 +165,17 @@ export class ApiGateway {
 
   protected readonly basePath: string;
 
-  protected readonly queryTransformer: any;
+  protected readonly queryTransformer: QueryTransformerFn;
 
   protected readonly subscriptionStore: any;
 
   protected readonly enforceSecurityChecks: boolean;
 
-  protected readonly extendContext: any;
+  protected readonly extendContext?: ExtendContextFn;
 
-  protected requestMiddleware: any;
+  protected readonly requestMiddleware: RequestHandler[];
 
-  public checkAuthFn: any;
+  public readonly checkAuthFn: CheckAuthFn;
 
   public constructor(
     protected readonly apiSecret: string,
@@ -180,24 +190,20 @@ export class ApiGateway {
 
     this.basePath = options.basePath || '/cubejs-api';
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    this.queryTransformer = options.queryTransformer || (async (query, context) => query);
+    this.queryTransformer = options.queryTransformer || (async (query) => query);
     this.subscriptionStore = options.subscriptionStore || new LocalSubscriptionStore();
     this.enforceSecurityChecks = options.enforceSecurityChecks || (process.env.NODE_ENV === 'production');
     this.extendContext = options.extendContext;
-
-    this.initializeMiddleware(options);
-  }
-
-  protected initializeMiddleware(options) {
-    const checkAuthMiddleware = options.checkAuthMiddleware || this.checkAuth.bind(this);
     this.checkAuthFn = options.checkAuth || this.defaultCheckAuth.bind(this);
-    const requestContextMiddleware = this.requestContextMiddleware.bind(this);
-    const requestLoggerMiddleware = options.requestLoggerMiddleware || this.requestLogger.bind(this);
-    this.requestMiddleware = [checkAuthMiddleware, requestContextMiddleware, requestLoggerMiddleware];
+
+    this.requestMiddleware = [
+      options.checkAuthMiddleware || this.checkAuth,
+      this.requestContextMiddleware,
+      options.requestLoggerMiddleware || this.requestLogger
+    ];
   }
 
-  public initApp(app: any) {
+  public initApp(app: ExpressApplication) {
     app.get(`${this.basePath}/v1/load`, this.requestMiddleware, (async (req, res) => {
       await this.load({
         query: req.query.query,
@@ -281,7 +287,7 @@ export class ApiGateway {
     }
   }
 
-  protected async meta({ context, res }) {
+  public async meta({ context, res }) {
     const requestStarted = new Date();
     try {
       const metaConfig = await this.getCompilerApi(context).metaConfig({ requestId: context.requestId });
@@ -330,7 +336,7 @@ export class ApiGateway {
     return [queryType, normalizedQueries];
   }
 
-  protected async sql({ query, context, res }) {
+  public async sql({ query, context, res }) {
     const requestStarted = new Date();
 
     try {
@@ -387,7 +393,7 @@ export class ApiGateway {
     }
   }
 
-  protected async load({ query, context, res, ...props }: any) {
+  public async load({ query, context, res, ...props }: any) {
     const requestStarted = new Date();
 
     try {
@@ -487,7 +493,7 @@ export class ApiGateway {
     }
   }
 
-  protected async subscribe({
+  public async subscribe({
     query, context, res, subscribe, subscriptionState, queryType
   }) {
     const requestStarted = new Date();
@@ -532,7 +538,7 @@ export class ApiGateway {
     }
   }
 
-  protected resToResultFn(res: express.Response) {
+  protected resToResultFn(res: Response) {
     // @ts-ignore
     return (message, { status } = {}) => (status ? res.status(status).json(message) : res.json(message));
   }
@@ -563,7 +569,7 @@ export class ApiGateway {
     return this.adapterApi;
   }
 
-  protected async contextByReq(req, authInfo, requestId) {
+  public async contextByReq(req, authInfo, requestId) {
     const extensions = await Promise.resolve(typeof this.extendContext === 'function' ? this.extendContext(req) : {});
 
     return {
@@ -577,7 +583,7 @@ export class ApiGateway {
     return req.headers['x-request-id'] || req.headers.traceparent || uuid();
   }
 
-  protected handleError({
+  public handleError({
     e, context, query, res, requestStarted
   }: any) {
     if (e instanceof CubejsHandlerError) {
@@ -650,7 +656,7 @@ export class ApiGateway {
     }
   }
 
-  protected async checkAuth(req, res, next) {
+  protected checkAuth: RequestHandler = async (req, res, next) => {
     const auth = req.headers.authorization;
 
     try {
@@ -672,14 +678,14 @@ export class ApiGateway {
     }
   }
 
-  protected async requestContextMiddleware(req, res, next) {
+  protected requestContextMiddleware: RequestHandler = async (req: Request, res: Response, next: NextFunction) => {
     req.context = await this.contextByReq(req, req.authInfo, this.requestIdByReq(req));
     if (next) {
       next();
     }
   }
 
-  protected async requestLogger(req, res, next) {
+  protected requestLogger: RequestHandler = async (req: Request, res: Response, next: NextFunction) => {
     const details = requestParser(req, res);
     this.log(req.context, { type: 'REST API Request', ...details });
     if (next) {
